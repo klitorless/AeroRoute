@@ -1,4 +1,5 @@
-"""Tests for modules/ping_stats.py — metric semantics and probe scheduling."""
+"""Tests for modules/ping_stats.py — unified probe window, metric semantics,
+and probe scheduling."""
 import pytest
 
 from modules.ping_stats import (
@@ -8,6 +9,7 @@ from modules.ping_stats import (
     mark_inflight,
     new_target_state,
     record_result,
+    successful_latencies,
 )
 
 
@@ -20,6 +22,78 @@ def _state_with(*latencies, fails=0):
     return s
 
 
+class TestUnifiedWindow:
+    def test_successes_and_failures_share_one_history(self):
+        s = _state_with(10.0, 20.0, fails=2)
+        assert len(s["probes"]) == 4
+        assert list(s["probes"]) == [
+            (True, 10.0), (True, 20.0), (False, None), (False, None)]
+
+    def test_old_probes_leave_the_window_together(self):
+        # Fill the window with successes, then push failures in: the
+        # evicted entries must be the oldest successes, and loss must
+        # describe exactly the 1000 probes still in the window.
+        s = new_target_state()
+        for _ in range(WINDOW):
+            record_result(s, True, 10.0)
+        record_result(s, False, 0.0)
+        record_result(s, False, 0.0)
+        assert len(s["probes"]) == WINDOW
+        m = compute_metrics(s)
+        assert m["probes"] == WINDOW
+        assert m["loss"] == pytest.approx(2 / WINDOW * 100)
+        assert m["avg"] == pytest.approx(10.0)  # 998 remaining successes
+        assert m["samples"] == WINDOW - 2
+
+    def test_loss_and_latency_describe_same_probes(self):
+        s = _state_with(10.0, 20.0, fails=2)
+        m = compute_metrics(s)
+        assert m["probes"] == 4
+        assert m["loss"] == 50.0
+        assert m["avg"] == pytest.approx(15.0)
+        assert m["min"] == 10.0
+        assert m["max"] == 20.0
+
+    def test_failures_do_not_affect_avg_min_max(self):
+        s = _state_with(10.0, 20.0)
+        m = record_result(s, False, 0.0)
+        assert m["avg"] == pytest.approx(15.0)
+        assert m["min"] == 10.0
+        assert m["max"] == 20.0
+
+    def test_jitter_uses_successful_samples(self):
+        # A failure between two successes must not disturb the jitter:
+        # |30 - 10| = 20, not anything involving the failed probe.
+        s = new_target_state()
+        record_result(s, True, 10.0)
+        record_result(s, False, 0.0)
+        m = record_result(s, True, 30.0)
+        assert m["jitter"] == pytest.approx(20.0)
+
+    def test_all_failure_window_has_no_latency_stats(self):
+        s = new_target_state()
+        m = record_result(s, False, 0.0)
+        m = record_result(s, False, 0.0)
+        assert m["avg"] is None
+        assert m["min"] is None
+        assert m["max"] is None
+        assert m["last"] is None
+        assert m["loss"] == 100.0
+
+    def test_window_limit_enforced(self):
+        s = new_target_state()
+        for i in range(WINDOW + 200):
+            if i % 2:
+                record_result(s, True, float(i))
+            else:
+                record_result(s, False, 0.0)
+        assert len(s["probes"]) == WINDOW
+        m = compute_metrics(s)
+        assert m["probes"] == WINDOW
+        # The last 1000 probes contain exactly 500 failures.
+        assert m["loss"] == 50.0
+
+
 class TestMetrics:
     def test_basic_stats(self):
         m = compute_metrics(_state_with(10.0, 20.0, 30.0))
@@ -28,23 +102,12 @@ class TestMetrics:
         assert m["max"] == 30.0
         assert m["loss"] == 0.0
 
-    def test_failed_probe_does_not_corrupt_latency(self):
-        # The old code displayed avg=999 on failure. A failed probe must
-        # affect loss only — latency stats come from successes alone.
+    def test_failed_probe_does_not_invent_latency(self):
+        # No fake "999 ms" placeholder: a failed probe affects loss only.
         s = _state_with(10.0, 20.0)
         m = record_result(s, False, 0.0)
         assert m["avg"] == pytest.approx(15.0)
-        assert m["min"] == 10.0
-        assert m["max"] == 20.0
         assert m["loss"] == pytest.approx(100 / 3)
-
-    def test_all_failed_means_no_latency_stats(self):
-        s = new_target_state()
-        m = record_result(s, False, 0.0)
-        assert m["avg"] is None
-        assert m["min"] is None
-        assert m["max"] is None
-        assert m["loss"] == 100.0
 
     def test_empty_state(self):
         m = compute_metrics(new_target_state())
@@ -58,8 +121,8 @@ class TestMetrics:
         assert m["loss"] == 75.0
         assert m["avg"] == pytest.approx(10.0)
 
-    def test_jitter_is_consecutive_delta(self):
-        # Documented definition: |latest - previous| sample delta,
+    def test_jitter_is_consecutive_successful_delta(self):
+        # Documented definition: |latest successful - previous successful|,
         # NOT RFC 3550 interarrival jitter.
         s = _state_with(10.0, 30.0)
         m = compute_metrics(s)
@@ -69,11 +132,9 @@ class TestMetrics:
         m = compute_metrics(_state_with(10.0))
         assert m["jitter"] == 0.0
 
-    def test_window_bounded(self):
-        s = new_target_state()
-        for i in range(WINDOW + 100):
-            record_result(s, True, float(i))
-        assert len(s["latencies"]) <= WINDOW
+    def test_successful_latencies_helper(self):
+        s = _state_with(10.0, 20.0, fails=1)
+        assert successful_latencies(s) == [10.0, 20.0]
 
 
 class TestScheduling:

@@ -1,13 +1,18 @@
 """Ping statistics and probe scheduling. Qt-free so they can be unit tested.
 
 Metric semantics (deliberate, documented here and in the README):
+  - One bounded history of probe outcomes per target: each entry is
+    (success, latency-or-None). Packet loss AND latency statistics are
+    always computed from this same window, so they can never describe
+    different time periods.
   - A failed probe NEVER contributes a latency sample. There is no fake
     "999 ms" placeholder: average/min/max are computed over successful
     samples only, and are None when no successful sample exists.
-  - packet loss = failed probes / total probes, over a bounded window.
-  - jitter = |latest sample - previous sample| ("last-sample jitter").
-    This is a simple consecutive-sample delta, NOT RFC 3550 interarrival
-    jitter. It is cheap to compute per tick and honest about what it is.
+  - packet loss = failed probes / total probes, over the bounded window.
+  - jitter = |latest successful latency - previous successful latency|
+    ("last-sample jitter"). This is a simple consecutive-sample delta,
+    NOT RFC 3550 interarrival jitter. It is cheap to compute per tick
+    and honest about what it is.
 
 Scheduling:
   - each monitored target carries an "inflight" flag; the scheduler only
@@ -16,7 +21,7 @@ Scheduling:
 """
 from collections import deque
 
-WINDOW = 1000  # max samples retained per target
+WINDOW = 1000  # max probe outcomes retained per target
 
 
 def new_target_state():
@@ -24,27 +29,30 @@ def new_target_state():
     return {
         "active": True,
         "inflight": False,
-        "latencies": deque(maxlen=WINDOW),
-        "failures": deque(maxlen=WINDOW),
+        "probes": deque(maxlen=WINDOW),
         "curve": None,
     }
 
 
 def record_result(state, success, latency):
     """Record one probe outcome. Returns the metric dict for the UI."""
-    state["failures"].append(not success)
-    if success:
-        state["latencies"].append(latency)
+    state["probes"].append((bool(success), latency if success else None))
     state["inflight"] = False
     return compute_metrics(state)
 
 
+def successful_latencies(state):
+    """Latencies of successful probes in the window, oldest first."""
+    return [lat for ok, lat in state["probes"] if ok]
+
+
 def compute_metrics(state):
-    """Derive display metrics from raw samples. Pure function."""
-    lat = list(state["latencies"])
-    fails = list(state["failures"])
-    total = len(fails)
-    loss = (sum(fails) / total * 100) if total else 0.0
+    """Derive display metrics from the unified probe history. Pure."""
+    probes = list(state["probes"])
+    total = len(probes)
+    fails = sum(1 for ok, _ in probes if not ok)
+    loss = (fails / total * 100) if total else 0.0
+    lat = [l for ok, l in probes if ok]
     if lat:
         avg = sum(lat) / len(lat)
         mn, mx = min(lat), max(lat)

@@ -33,7 +33,7 @@ from modules.packet_analysis import PacketAnalysisWidget
 from modules.dns_tools import DNSToolsWidget
 from modules.ssl_scanner import SSLScannerWidget
 from modules.whois_utils import WhoisWidget
-from modules.ping_stats import new_target_state, record_result, mark_inflight
+from modules.ping_stats import new_target_state, record_result, mark_inflight, successful_latencies
 from modules.target_io import parse_target_import_json, serialize_targets, MAX_IMPORTS
 
 # Handle Speedtest Dependency
@@ -509,7 +509,7 @@ class MainWindow(QMainWindow):
             hist.removeItem(hist.count() - 1)
 
         if s["curve"]:
-            s["curve"].setData(list(s["latencies"])[-50:])
+            s["curve"].setData(successful_latencies(s)[-50:])
 
     def export_targets(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export Targets", "", "JSON (*.json)")

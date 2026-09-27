@@ -34,8 +34,11 @@ latency samples (no placeholder values). Jitter here is the simple
 consecutive-sample delta |latest − previous|, not RFC 3550 interarrival
 jitter. Each target has at most one probe in flight at a time.
 
-Every network operation has a bounded timeout (DNS 5 s, WHOIS 10 s, SSL 5 s,
-ping 2–3 s, packet send 3 s, geolocation 3 s).
+Network operations use bounded timeouts where the underlying API supports
+explicit timeout control (DNS 5 s, WHOIS 10 s, SSL 5 s, ping 2–3 s,
+packet send 3 s, geolocation 3 s). OS resolver calls such as reverse DNS
+do not expose an application-level timeout and are isolated from the GUI
+thread.
 
 ## Install & run
 
@@ -76,8 +79,8 @@ boundaries. GUI widgets are not automated.
   (raw sockets need admin/root). TCP/UDP sends are real.
 - WHOIS for IP addresses returns the IANA referral, not the full RIR record.
 - `speedtest-cli` uses its own internal timeouts.
-- Reverse-DNS lookups have no timeout of their own (OS resolver) but run on
-  worker threads and are cached per target.
+- Reverse DNS runs on worker threads (never the GUI thread) and is cached
+  per target, since the OS resolver offers no application-level timeout.
 - Use responsibly and in compliance with local laws.
 
 © 2026 AeRoLogic. All rights reserved.

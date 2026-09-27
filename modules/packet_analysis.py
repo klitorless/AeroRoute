@@ -1,5 +1,6 @@
-import time, socket
+import time
 from .packet_codecs import decode_base64, decode_hex, xor_brute_decode
+from .packet_sender import send_test_packet
 from .target_validation import normalize_target
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget, 
@@ -173,19 +174,15 @@ class PacketAnalysisWidget(QWidget):
         proto = self.gen_proto.currentText()
         payload = self.gen_payload.text().encode("utf-8", errors="ignore")
         try:
-            if proto == "TCP":
-                with socket.create_connection((target, port), timeout=3) as s:
-                    s.sendall(payload)
-                self.gen_output.append(f"[+] TCP: sent {len(payload)} bytes to {target}:{port}")
-            elif proto == "UDP":
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                    s.settimeout(3)
-                    s.sendto(payload, (target, port))
-                self.gen_output.append(f"[+] UDP: sent {len(payload)} bytes to {target}:{port}")
-            else:
+            if proto == "ICMP":
                 # ICMP needs raw sockets (admin/root) — kept simulated.
                 self.gen_output.append(
                     f"[*] ICMP send is simulated (raw sockets need elevated privileges): "
                     f"payload '{self.gen_payload.text()}' to {target}")
+            else:
+                sent = send_test_packet(_kind, target, port, payload, proto)
+                self.gen_output.append(f"[+] {proto}: sent {sent} bytes to {target}:{port}")
+        except ValueError as e:
+            self.gen_output.append(f"[!] Invalid send parameters: {e}")
         except Exception as e:
             self.gen_output.append(f"[!] {proto} send to {target}:{port} failed: {e}")
