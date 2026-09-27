@@ -1,0 +1,23 @@
+# NetScanTools PRO / AeRoRoute runtime dependencies
+# Pinned 2026-09-27. Python >= 3.10 recommended.
+
+# GUI framework + latency graph widgets (main.py)
+PyQt6==6.11.0
+pyqtgraph==0.14.0
+
+# System network activity tab (modules/system_activity.py)
+psutil==7.2.2
+
+# Default-gateway auto-detect on startup (main.py add_gateway)
+netifaces==0.11.0
+
+# Bandwidth speed test tab (main.py SpeedTestTab)
+speedtest-cli==2.1.3
+
+# Full DNS record lookups A/AAAA/CNAME/MX/TXT/NS/SOA (modules/dns_tools.py)
+dnspython==2.8.0
+
+# NOTE: netifaces 0.11.0 is unmaintained (last release 2021) and can fail to
+# build on newer toolchains. If install fails, swap for the maintained fork:
+#   netifaces2>=0.0.23
+# and keep `import netifaces` unchanged (netifaces2 is a drop-in).
