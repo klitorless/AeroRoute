@@ -1,48 +1,32 @@
-import re
-import socket
-from urllib.parse import urlparse
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QTextEdit
+from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
-_IANA = "whois.iana.org"
-_VERISIGN = "whois.verisign-grs.com"  # authoritative for .com / .net
-
-
-def _whois_query(server, query, timeout=10):
-    """Raw WHOIS query. Socket is always closed, even on error."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    try:
-        s.connect((server, 43))
-        s.sendall((query + "\r\n").encode("utf-8", errors="ignore"))
-        chunks = []
-        while True:
-            data = s.recv(4096)
-            if not data:
-                break
-            chunks.append(data)
-        return b"".join(chunks).decode("utf-8", errors="ignore")
-    finally:
-        s.close()
+from .whois_service import perform_whois
 
 
-def _tld_whois_server(tld):
-    """Ask IANA which WHOIS server is authoritative for a TLD."""
-    try:
-        resp = _whois_query(_IANA, tld)
-        m = re.search(r"(?im)^whois:\s*(\S+)", resp)
-        return m.group(1) if m else None
-    except Exception:
-        return None
+class WhoisWorker(QObject):
+    """Runs perform_whois() off the GUI thread.
 
+    UI -> Worker -> Service -> Network -> Signal -> UI.
+    Never touches widgets directly; results return via signals.
+    """
+    result = pyqtSignal(str)
+    error = pyqtSignal(str)
+    done = pyqtSignal()
 
-def _clean_query(raw):
-    q = (raw or "").strip()
-    if "://" in q:
-        q = urlparse(q).hostname or q
-    q = q.strip().lower().rstrip(".")
-    if not q or any(c in q for c in " \t\r\n;|&$`"):
-        return None
-    return q
+    def __init__(self, query):
+        super().__init__()
+        self.query = query
+
+    def run(self):
+        try:
+            self.result.emit(perform_whois(self.query))
+        except ValueError as e:
+            self.error.emit(str(e))
+        except Exception as e:
+            self.error.emit(f"WHOIS Error: {e}")
+        finally:
+            self.done.emit()
 
 
 class WhoisWidget(QWidget):
@@ -50,43 +34,35 @@ class WhoisWidget(QWidget):
         super().__init__()
         layout = QVBoxLayout()
         self.target_input = QLineEdit("example.com")
-        whois_btn = QPushButton("Query WHOIS")
-        whois_btn.setStyleSheet("background-color: #FF5722; color: white;")
-        whois_btn.clicked.connect(self.query_whois)
+        self.whois_btn = QPushButton("Query WHOIS")
+        self.whois_btn.setStyleSheet("background-color: #FF5722; color: white;")
+        self.whois_btn.clicked.connect(self.start_query)
         self.output = QTextEdit()
         self.output.setReadOnly(True)
 
         layout.addWidget(QLabel("Domain or IP:"))
         layout.addWidget(self.target_input)
-        layout.addWidget(whois_btn)
+        layout.addWidget(self.whois_btn)
         layout.addWidget(QLabel("WHOIS Response:"))
         layout.addWidget(self.output)
         self.setLayout(layout)
 
-    def query_whois(self):
-        query = _clean_query(self.target_input.text())
-        if not query:
-            self.output.setPlainText("Invalid query.")
-            return
-        try:
-            if re.fullmatch(r"[\d.]+", query) or ":" in query:
-                # IP address: IANA returns the responsible RIR referral.
-                text = _whois_query(_IANA, query)
-            else:
-                tld = query.rsplit(".", 1)[-1]
-                if tld in ("com", "net"):
-                    server = _VERISIGN
-                else:
-                    server = _tld_whois_server(tld) or _IANA
-                text = f"[via {server}]\n" + _whois_query(server, query)
-                # Follow one registrar referral (typical for .com/.net).
-                m = re.search(r"(?im)^Registrar WHOIS Server:\s*(\S+)", text)
-                if m and m.group(1).lower() != server.lower():
-                    ref = m.group(1)
-                    try:
-                        text += f"\n\n--- Referral: {ref} ---\n" + _whois_query(ref, query)
-                    except Exception as e:
-                        text += f"\n[referral query to {ref} failed: {e}]"
-            self.output.setPlainText(text or "(empty response)")
-        except Exception as e:
-            self.output.setPlainText(f"WHOIS Error: {e}")
+        self.thread = None
+        self.worker = None
+
+    def start_query(self):
+        query = self.target_input.text()
+        self.whois_btn.setEnabled(False)
+        self.output.setPlainText("Querying...")
+
+        self.thread = QThread()
+        self.worker = WhoisWorker(query)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.result.connect(self.output.setPlainText)
+        self.worker.error.connect(self.output.setPlainText)
+        self.worker.done.connect(self.thread.quit)
+        self.worker.done.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.finished.connect(lambda: self.whois_btn.setEnabled(True))
+        self.thread.start()

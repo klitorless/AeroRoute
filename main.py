@@ -7,7 +7,6 @@ import subprocess
 import re
 import ipaddress
 import urllib.request
-import threading
 import logging
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
@@ -34,6 +33,8 @@ from modules.packet_analysis import PacketAnalysisWidget
 from modules.dns_tools import DNSToolsWidget
 from modules.ssl_scanner import SSLScannerWidget
 from modules.whois_utils import WhoisWidget
+from modules.ping_stats import new_target_state, record_result, mark_inflight
+from modules.target_io import parse_target_import_json, serialize_targets, MAX_IMPORTS
 
 # Handle Speedtest Dependency
 try:
@@ -381,8 +382,10 @@ class MainWindow(QMainWindow):
             if gw:
                 self.ip_input.setText(gw)
                 self.add_device("Gateway")
-        except Exception:
-            pass
+        except Exception as e:
+            # netifaces is optional; a missing/broken install only means no
+            # gateway shortcut, which is not worth surfacing to the user.
+            logging.debug("Gateway auto-detect skipped: %s", e)
 
     def add_device(self, name="-", method="ICMP"):
         user_input = self.ip_input.text().strip()
@@ -391,7 +394,7 @@ class MainWindow(QMainWindow):
         if not target_ip or not is_valid_target(target_ip) or target_ip in self.stats:
             return
         
-        self.stats[target_ip] = {"active": True, "latencies": [], "failures": [], "curve": None}
+        self.stats[target_ip] = new_target_state()
         QThreadPool.globalInstance().start(LocationFetcher(target_ip, self.ping_signals))
         
         row = self.table.rowCount()
@@ -461,95 +464,86 @@ class MainWindow(QMainWindow):
             return
         for r in range(self.table.rowCount()):
             target = self.table.item(r, 1).text()
-            s = self.stats.get(target)
-            if s and s.get("active"):
-                pkg_size = self.size_input.value()
-                task = PingTask(target, pkg_size, self.table.cellWidget(r, 11).currentText(), self.ping_signals)
-                QThreadPool.globalInstance().start(task)
+            # mark_inflight() claims the probe slot: a target with a probe
+            # already outstanding is skipped, so slow targets can never
+            # stack up overlapping probes.
+            if not mark_inflight(self.stats, target):
+                continue
+            pkg_size = self.size_input.value()
+            task = PingTask(target, pkg_size, self.table.cellWidget(r, 11).currentText(), self.ping_signals)
+            QThreadPool.globalInstance().start(task)
 
     def on_result(self, target, success, lat, host):
         row = self.find_row(target)
         if row == -1:
             return
-        s = self.stats[target]
-        s["failures"].append(not success)
-        if success:
-            s["latencies"].append(lat)
-            
-        if len(s["failures"]) > 1000:
-            s["failures"] = s["failures"][-1000:]
-        if len(s["latencies"]) > 1000:
-            s["latencies"] = s["latencies"][-1000:]
+        s = self.stats.get(target)
+        if s is None:
+            return  # row was removed while the probe was in flight
+        # record_result() clears the inflight flag and derives metrics.
+        # Failed probes affect loss only — they never invent latency samples.
+        m = record_result(s, success, lat)
 
-        avg = 999 if not success else (sum(s["latencies"]) / len(s["latencies"]) if s["latencies"] else 0)
-        mn, mx = (min(s["latencies"]), max(s["latencies"])) if s["latencies"] else (0, 0)
-        jit = abs(s["latencies"][-1] - s["latencies"][-2]) if len(s["latencies"]) > 1 else 0
-        loss = (sum(s["failures"]) / len(s["failures"])) * 100 if s["failures"] else 0
-        
         stat = "OFFLINE" if not success else ("ONLINE" if lat < 100 else "HIGH LATENCY")
         status_color = "#B71C1C" if not success else ("#1B5E20" if lat < 100 else "#F57F17")
-        
+
         for i in range(8):
             self.table.item(row, i).setBackground(QColor("#B71C1C" if not success else Qt.GlobalColor.transparent))
-            
+
         self.table.item(row, 0).setText(host)
         self.table.item(row, 3).setText(stat)
         self.table.item(row, 3).setBackground(QColor(status_color))
         self.table.item(row, 4).setText(f"{lat:.1f}ms" if success else "-")
-        self.table.item(row, 5).setText(f"{avg:.1f}ms")
-        self.table.item(row, 6).setText(f"{jit:.1f}ms" if success else "-")
-        self.table.item(row, 7).setText(f"{loss:.0f}%")
-        
+        self.table.item(row, 5).setText(f"{m['avg']:.1f}ms" if m["avg"] is not None else "-")
+        self.table.item(row, 6).setText(f"{m['jitter']:.1f}ms" if success else "-")
+        self.table.item(row, 7).setText(f"{m['loss']:.0f}%")
+
         hist = self.table.cellWidget(row, 8)
-        hist.setItemText(0, f"Max: {mx:.1f} | Min: {mn:.1f}")
+        if m["max"] is not None:
+            hist.setItemText(0, f"Max: {m['max']:.1f} | Min: {m['min']:.1f}")
+        else:
+            hist.setItemText(0, "Max: - | Min: -")
         hist.insertItem(1, f"Last: {lat:.1f}ms" if success else "Last: Offline")
-        
+
         while hist.count() > 20:
             hist.removeItem(hist.count() - 1)
-            
+
         if s["curve"]:
-            s["curve"].setData(s["latencies"][-50:])
+            s["curve"].setData(list(s["latencies"])[-50:])
 
     def export_targets(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export Targets", "", "JSON (*.json)")
         if path:
-            data = [{"ip": self.table.item(r, 1).text(), "method": self.table.cellWidget(r, 11).currentText()} for r in range(self.table.rowCount())]
+            pairs = [(self.table.item(r, 1).text(), self.table.cellWidget(r, 11).currentText())
+                     for r in range(self.table.rowCount())]
             try:
                 with open(path, 'w') as f:
-                    json.dump(data, f, indent=4)
-            except Exception as e:
+                    f.write(serialize_targets(pairs))
+            except OSError as e:
                 print(f"[ERROR] Failed to export targets: {e}")
 
     def import_targets(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import Targets", "", "JSON (*.json)")
-        if path:
-            try:
-                with open(path, 'r') as f:
-                    items = json.load(f)
-                    
-                    # [SECURITY FIX] Cap imports to 50
-                    MAX_IMPORTS = 50
-                    imported_count = 0
-                    
-                    if not isinstance(items, list):
-                        print("[ERROR] Invalid JSON format. Expected a list.")
-                        return
-
-                    for item in items:
-                        if imported_count >= MAX_IMPORTS:
-                            print(f"[WARNING] Import cap reached. Only {MAX_IMPORTS} targets loaded.")
-                            break
-                            
-                        if isinstance(item, dict) and "ip" in item:
-                            safe_ip = str(item["ip"]).strip()
-                            method = str(item.get("method", "ICMP")).upper()
-                            if method not in ("ICMP", "TCP"):
-                                method = "ICMP"
-                            self.ip_input.setText(safe_ip)
-                            self.add_device(method=method)
-                            imported_count += 1
-            except Exception as e:
-                print(f"[ERROR] Failed to import targets: {e}")
+        if not path:
+            return
+        try:
+            with open(path, 'r') as f:
+                text = f.read()
+        except OSError as e:
+            print(f"[ERROR] Failed to import targets: {e}")
+            return
+        try:
+            # Parsing, validation, dedupe, and the import cap all live in
+            # modules/target_io.py (unit tested); the GUI just adds results.
+            entries = parse_target_import_json(text, existing=self.stats.keys())
+        except ValueError as e:
+            print(f"[ERROR] Failed to import targets: {e}")
+            return
+        if len(entries) == MAX_IMPORTS:
+            print(f"[WARNING] Import cap reached. Only {MAX_IMPORTS} targets loaded.")
+        for target, method in entries:
+            self.ip_input.setText(target)
+            self.add_device(method=method)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

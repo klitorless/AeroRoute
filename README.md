@@ -6,16 +6,36 @@ certificate scanning, WHOIS lookups, and packet payload decoding.
 
 ## Modules
 
-| Tab | What it does |
-|---|---|
-| Discovery & Ping Monitor | ICMP/TCP ping table with avg/jitter/loss, sparkline graphs, traceroute, JSON import/export |
-| System Network Activity | Per-interface I/O counters and active connections via psutil |
-| Bandwidth Speed Test | Download/upload/ping via speedtest-cli |
-| Packet Analysis & Decrypter | Base64 / hex / single-byte-XOR decoders, TCP/UDP test-payload sender |
-| Packet Capture (Simulated) | **Demo only** — randomly generated rows for UI testing, not live traffic |
-| DNS & Internet Intelligence | A / AAAA / CNAME / MX / TXT / NS / SOA lookups (dnspython) |
-| SSL & Security | TLS certificate details for a host on port 443 |
-| WHOIS & Utilities | Per-TLD WHOIS server discovery via IANA, with registrar-referral follow |
+| Tab | What it does | Real / limited |
+|---|---|---|
+| Discovery & Ping Monitor | ICMP/TCP ping table with avg/jitter/loss, sparkline graphs, traceroute, JSON import/export | Real |
+| System Network Activity | Per-interface I/O counters and active connections via psutil | Real |
+| Bandwidth Speed Test | Download/upload/ping via speedtest-cli | Real |
+| Packet Analysis & Decrypter | Base64 / hex / single-byte-XOR decoders, TCP/UDP test-payload sender | Real (TCP/UDP send); ICMP send is simulated — raw sockets need admin/root |
+| Packet Capture (Simulated) | **Demo only** — randomly generated rows for UI testing | Simulated, not live traffic |
+| DNS & Internet Intelligence | A / AAAA / CNAME / MX / TXT / NS / SOA lookups (dnspython), run on a worker thread | Real |
+| SSL & Security | TLS certificate details for a host on port 443, run on a worker thread | Real |
+| WHOIS & Utilities | Per-TLD WHOIS server discovery via IANA with one registrar-referral follow, run on a worker thread | Real, but limited: IP queries return the IANA/RIR referral only; full RIR referral chasing is not implemented |
+
+## Architecture
+
+Network operations follow a UI → Worker → Service → Network → Signal → UI
+pattern. The `modules/` package holds Qt-free service modules
+(`target_validation`, `packet_codecs`, `dns_service`, `whois_service`,
+`ssl_service`, `ping_stats`, `target_io`) that contain the real logic and are
+unit-tested without PyQt6. Thin Qt widgets call them from `QThread` workers
+and receive results through signals — workers never touch widgets directly.
+
+All user-supplied targets go through `modules/target_validation.py`
+(classify IPv4 / IPv6 / hostname, normalize URLs, reject shell metacharacters).
+
+Ping metrics: failed probes affect packet-loss only — they never invent
+latency samples (no placeholder values). Jitter here is the simple
+consecutive-sample delta |latest − previous|, not RFC 3550 interarrival
+jitter. Each target has at most one probe in flight at a time.
+
+Every network operation has a bounded timeout (DNS 5 s, WHOIS 10 s, SSL 5 s,
+ping 2–3 s, packet send 3 s, geolocation 3 s).
 
 ## Install & run
 
@@ -37,14 +57,27 @@ PyQt6, pyqtgraph, psutil, netifaces, speedtest-cli, dnspython.
 If `netifaces` fails to build (unmaintained since 2021), swap it for the
 drop-in fork `netifaces2` — no code changes needed.
 
+## Testing
+
+```bash
+pip install -r requirements-dev.txt   # pytest
+python -m pytest                      # 83 tests, no network access required
+```
+
+The suite exercises the real service functions (validation, codecs, DNS,
+WHOIS, ping statistics/scheduling, import/export) with mocked network
+boundaries. GUI widgets are not automated.
+
 ## Notes & limitations
 
 - The packet-capture tab is explicitly simulated; real capture would need
   libpcap/scapy and elevated privileges.
 - The ICMP option in the packet generator is simulated for the same reason
   (raw sockets need admin/root). TCP/UDP sends are real.
-- DNS/WHOIS/SSL lookups run in the GUI thread — the UI may briefly pause on
-  slow networks.
+- WHOIS for IP addresses returns the IANA referral, not the full RIR record.
+- `speedtest-cli` uses its own internal timeouts.
+- Reverse-DNS lookups have no timeout of their own (OS resolver) but run on
+  worker threads and are cached per target.
 - Use responsibly and in compliance with local laws.
 
 © 2026 AeRoLogic. All rights reserved.

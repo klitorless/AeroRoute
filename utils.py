@@ -1,9 +1,6 @@
 import os
 import subprocess
 import socket
-import re
-import ipaddress
-from urllib.parse import urlparse
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QTextEdit
 from PyQt6.QtCore import pyqtSignal, QObject, QThread
 
@@ -63,16 +60,14 @@ class AboutDialog(QDialog):
         self.setLayout(layout)
 
 def is_valid_target(target):
-    try:
-        ipaddress.ip_address(target)
-        return True
-    except ValueError:
-        return bool(re.match(r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$', target))
+    """Backward-compatible wrapper: prefer modules.target_validation."""
+    from modules.target_validation import is_valid_target as _v
+    return _v(target)
 
 def get_clean_target(user_input):
-    if "://" in user_input:
-        return urlparse(user_input).hostname
-    return user_input
+    """Backward-compatible wrapper: prefer modules.target_validation."""
+    from modules.target_validation import clean_target as _c
+    return _c(user_input)
 
 def resolve_hostname(target):
     try:

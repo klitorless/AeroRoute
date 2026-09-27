@@ -1,4 +1,6 @@
-import time, base64, socket
+import time, socket
+from .packet_codecs import decode_base64, decode_hex, xor_brute_decode
+from .target_validation import normalize_target
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget, 
     QTableWidgetItem, QTextEdit, QLabel, QCheckBox, QFileDialog, 
@@ -137,35 +139,36 @@ class PacketAnalysisWidget(QWidget):
 
     def decode_base64(self):
         try:
-            data = self.payload_input.toPlainText().strip()
-            decoded = base64.b64decode(data).decode('utf-8', errors='ignore')
-            self.decrypt_output.setPlainText(decoded)
-        except Exception as e:
+            self.decrypt_output.setPlainText(
+                decode_base64(self.payload_input.toPlainText()))
+        except ValueError as e:
             self.decrypt_output.setPlainText(f"Base64 Decode Error: {e}")
 
     def decode_hex(self):
         try:
-            data = self.payload_input.toPlainText().strip().replace(" ", "")
-            decoded = bytes.fromhex(data).decode('utf-8', errors='ignore')
-            self.decrypt_output.setPlainText(decoded)
-        except Exception as e:
+            self.decrypt_output.setPlainText(
+                decode_hex(self.payload_input.toPlainText()))
+        except ValueError as e:
             self.decrypt_output.setPlainText(f"Hex Decode Error: {e}")
 
     def decode_xor(self):
         try:
-            data = self.payload_input.toPlainText().encode('utf-8', errors='ignore')
-            results = []
-            for key in range(1, 256):
-                unmasked = bytes([b ^ key for b in data])
-                if all(32 <= b < 127 or b in (9, 10, 13) for b in unmasked[:20]):
-                    results.append(f"Key 0x{key:02X}: {unmasked.decode('utf-8', errors='ignore')}")
-            if results: self.decrypt_output.setPlainText("\n".join(results))
-            else: self.decrypt_output.setPlainText("No clear ASCII results found via single-byte XOR brute-force.")
-        except Exception as e:
+            results = xor_brute_decode(
+                self.payload_input.toPlainText().encode('utf-8', errors='ignore'))
+            if results:
+                self.decrypt_output.setPlainText("\n".join(results))
+            else:
+                self.decrypt_output.setPlainText(
+                    "No clear ASCII results found via single-byte XOR brute-force.")
+        except ValueError as e:
             self.decrypt_output.setPlainText(f"XOR Decryption Error: {e}")
 
     def generate_packet(self):
-        target = self.gen_target.text().strip()
+        norm = normalize_target(self.gen_target.text())
+        if norm is None:
+            self.gen_output.append("[!] Invalid target — enter an IP address or hostname.")
+            return
+        _kind, target = norm
         port = self.gen_port.value()
         proto = self.gen_proto.currentText()
         payload = self.gen_payload.text().encode("utf-8", errors="ignore")

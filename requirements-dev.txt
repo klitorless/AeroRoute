@@ -1,0 +1,4 @@
+# Development / testing dependencies for AeroRoute.
+# Install with: pip install -r requirements-dev.txt  (after requirements.txt)
+
+pytest==9.1.1

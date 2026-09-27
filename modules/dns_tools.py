@@ -1,15 +1,32 @@
-import socket
-from urllib.parse import urlparse
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QTextEdit
+from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
-try:
-    import dns.resolver
-    import dns.exception
-    DNSPYTHON_AVAILABLE = True
-except ImportError:
-    DNSPYTHON_AVAILABLE = False
+from .dns_service import perform_dns_lookup, DNSPYTHON_AVAILABLE
 
-_RECORD_TYPES = ("A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA")
+
+class DnsWorker(QObject):
+    """Runs perform_dns_lookup() off the GUI thread.
+
+    UI -> Worker -> Service -> Network -> Signal -> UI.
+    Never touches widgets directly; results return via signals.
+    """
+    result = pyqtSignal(str)
+    error = pyqtSignal(str)
+    done = pyqtSignal()
+
+    def __init__(self, domain):
+        super().__init__()
+        self.domain = domain
+
+    def run(self):
+        try:
+            self.result.emit(perform_dns_lookup(self.domain))
+        except ValueError as e:
+            self.error.emit(str(e))
+        except Exception as e:
+            self.error.emit(f"DNS Lookup Error: {e}")
+        finally:
+            self.done.emit()
 
 
 class DNSToolsWidget(QWidget):
@@ -17,9 +34,9 @@ class DNSToolsWidget(QWidget):
         super().__init__()
         layout = QVBoxLayout()
         self.target_input = QLineEdit("example.com")
-        resolve_btn = QPushButton("Lookup DNS Records")
-        resolve_btn.setStyleSheet("background-color: #2196F3; color: white;")
-        resolve_btn.clicked.connect(self.lookup_dns)
+        self.resolve_btn = QPushButton("Lookup DNS Records")
+        self.resolve_btn.setStyleSheet("background-color: #2196F3; color: white;")
+        self.resolve_btn.clicked.connect(self.start_lookup)
         self.output = QTextEdit()
         self.output.setReadOnly(True)
 
@@ -30,57 +47,27 @@ class DNSToolsWidget(QWidget):
 
         layout.addWidget(QLabel("Target Domain:"))
         layout.addWidget(self.target_input)
-        layout.addWidget(resolve_btn)
+        layout.addWidget(self.resolve_btn)
         layout.addWidget(QLabel("DNS Results:"))
         layout.addWidget(self.output)
         self.setLayout(layout)
 
-    @staticmethod
-    def _clean(domain):
-        d = (domain or "").strip()
-        if "://" in d:
-            d = urlparse(d).hostname or d
-        return d.strip().rstrip(".")
+        self.thread = None
+        self.worker = None
 
-    def lookup_dns(self):
-        domain = self._clean(self.target_input.text())
-        if not domain:
-            return
-        if DNSPYTHON_AVAILABLE:
-            self.output.setPlainText(self._full_lookup(domain))
-        else:
-            self.output.setPlainText(self._basic_lookup(domain))
+    def start_lookup(self):
+        domain = self.target_input.text()
+        self.resolve_btn.setEnabled(False)
+        self.output.setPlainText("Looking up...")
 
-    def _full_lookup(self, domain):
-        resolver = dns.resolver.Resolver()
-        resolver.lifetime = 5
-        lines = []
-        for rtype in _RECORD_TYPES:
-            lines.append(f"--- {rtype} ---")
-            try:
-                for r in resolver.resolve(domain, rtype):
-                    lines.append(f"  {r.to_text()}")
-            except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN,
-                    dns.resolver.NoNameservers, dns.exception.Timeout) as e:
-                lines.append(f"  (no data: {type(e).__name__})")
-            except Exception as e:
-                lines.append(f"  (error: {e})")
-        # Reverse lookup on the first A record, if any.
-        try:
-            a = resolver.resolve(domain, "A")
-            ip = a[0].to_text()
-            host, _, _ = socket.gethostbyaddr(ip)
-            lines.append(f"--- PTR ({ip}) ---\n  {host}")
-        except Exception:
-            pass
-        return "\n".join(lines)
-
-    def _basic_lookup(self, domain):
-        # Fallback when dnspython is unavailable: A + PTR only.
-        try:
-            ip = socket.gethostbyname(domain)
-            host, aliases, ips = socket.gethostbyaddr(ip)
-            return (f"Primary IP: {ip}\nCanonical Hostname: {host}\n"
-                    f"Aliases: {aliases}\nAll Associated IPs: {ips}")
-        except Exception as e:
-            return f"DNS Lookup Error: {e}"
+        self.thread = QThread()
+        self.worker = DnsWorker(domain)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.result.connect(self.output.setPlainText)
+        self.worker.error.connect(self.output.setPlainText)
+        self.worker.done.connect(self.thread.quit)
+        self.worker.done.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.finished.connect(lambda: self.resolve_btn.setEnabled(True))
+        self.thread.start()

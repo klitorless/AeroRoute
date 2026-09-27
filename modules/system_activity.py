@@ -61,8 +61,13 @@ class SystemActivityWidget(QWidget):
                 pid = str(c.pid) if c.pid else "-"
                 pname = "-"
                 if c.pid:
-                    try: pname = psutil.Process(c.pid).name()
-                    except: pass
+                    try:
+                        pname = psutil.Process(c.pid).name()
+                    except Exception:
+                        # The process can exit between listing connections and
+                        # reading its name; a missing name is expected, not an
+                        # error, so it is intentionally ignored here.
+                        pass
                 
                 self.conn_table.setItem(row, 0, QTableWidgetItem(pname))
                 self.conn_table.setItem(row, 1, QTableWidgetItem(pid))

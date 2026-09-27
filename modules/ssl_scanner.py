@@ -1,40 +1,68 @@
-import ssl, socket
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QTextEdit
+from PyQt6.QtCore import QObject, QThread, pyqtSignal
+
+from .ssl_service import perform_ssl_scan
+
+
+class SslWorker(QObject):
+    """Runs perform_ssl_scan() off the GUI thread.
+
+    UI -> Worker -> Service -> Network -> Signal -> UI.
+    Never touches widgets directly; results return via signals.
+    """
+    result = pyqtSignal(str)
+    error = pyqtSignal(str)
+    done = pyqtSignal()
+
+    def __init__(self, host):
+        super().__init__()
+        self.host = host
+
+    def run(self):
+        try:
+            self.result.emit(perform_ssl_scan(self.host))
+        except ValueError as e:
+            self.error.emit(str(e))
+        except Exception as e:
+            self.error.emit(f"SSL Scan Error: {e}")
+        finally:
+            self.done.emit()
+
 
 class SSLScannerWidget(QWidget):
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout()
         self.target_input = QLineEdit("google.com")
-        scan_btn = QPushButton("Scan SSL/TLS Certificate")
-        scan_btn.setStyleSheet("background-color: #9C27B0; color: white;")
-        scan_btn.clicked.connect(self.scan_ssl)
+        self.scan_btn = QPushButton("Scan SSL/TLS Certificate")
+        self.scan_btn.setStyleSheet("background-color: #9C27B0; color: white;")
+        self.scan_btn.clicked.connect(self.start_scan)
         self.output = QTextEdit()
         self.output.setReadOnly(True)
-        
+
         layout.addWidget(QLabel("Target Host (Port 443):"))
         layout.addWidget(self.target_input)
-        layout.addWidget(scan_btn)
+        layout.addWidget(self.scan_btn)
         layout.addWidget(QLabel("Certificate Details:"))
         layout.addWidget(self.output)
         self.setLayout(layout)
-        
-    def scan_ssl(self):
-        host = self.target_input.text().strip()
-        if not host: return
-        try:
-            ctx = ssl.create_default_context()
-            with socket.create_connection((host, 443), timeout=3) as sock:
-                with ctx.wrap_socket(sock, server_hostname=host) as ssock:
-                    cert = ssock.getpeercert()
-                    cipher = ssock.cipher()
-                    info = f"--- Certificate Details for {host} ---\n"
-                    info += f"Subject: {dict(x[0] for x in cert.get('subject', []))}\n"
-                    info += f"Issuer: {dict(x[0] for x in cert.get('issuer', []))}\n"
-                    info += f"Version: {cert.get('version')}\n"
-                    info += f"Not Before: {cert.get('notBefore')}\n"
-                    info += f"Not After: {cert.get('notAfter')}\n"
-                    info += f"Cipher Suite: {cipher}\n"
-                    self.output.setPlainText(info)
-        except Exception as e:
-            self.output.setPlainText(f"SSL Scan Error: {e}")
+
+        self.thread = None
+        self.worker = None
+
+    def start_scan(self):
+        host = self.target_input.text()
+        self.scan_btn.setEnabled(False)
+        self.output.setPlainText("Scanning...")
+
+        self.thread = QThread()
+        self.worker = SslWorker(host)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.result.connect(self.output.setPlainText)
+        self.worker.error.connect(self.output.setPlainText)
+        self.worker.done.connect(self.thread.quit)
+        self.worker.done.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.finished.connect(lambda: self.scan_btn.setEnabled(True))
+        self.thread.start()
