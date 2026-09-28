@@ -5,7 +5,7 @@ AeRoLogic Modular Suite
 Widget imports are lazy (PEP 562): importing the `modules` package itself
 never requires Qt, so the Qt-free service modules (target_validation,
 packet_codecs, dns_service, whois_service, ssl_service, ping_stats,
-target_io) can be imported and unit-tested without PyQt6 installed.
+target_io, observation) can be imported and unit-tested without PyQt6 installed.
 """
 
 _WIDGETS = {

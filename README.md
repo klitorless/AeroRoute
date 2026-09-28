@@ -22,7 +22,7 @@ certificate scanning, WHOIS lookups, and packet payload decoding.
 Network operations follow a UI → Worker → Service → Network → Signal → UI
 pattern. The `modules/` package holds Qt-free service modules
 (`target_validation`, `packet_codecs`, `dns_service`, `whois_service`,
-`ssl_service`, `ping_stats`, `target_io`) that contain the real logic and are
+`ssl_service`, `ping_stats`, `target_io`, `observation`) that contain the real logic and are
 unit-tested without PyQt6. Thin Qt widgets call them from `QThread` workers
 and receive results through signals — workers never touch widgets directly.
 
