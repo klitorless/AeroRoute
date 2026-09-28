@@ -1,7 +1,10 @@
 """Tests for modules/ping_stats.py — unified probe window, metric semantics,
 and probe scheduling."""
+import json
+
 import pytest
 
+from modules.observation import EvidenceKind, ObservationLog
 from modules.ping_stats import (
     WINDOW,
     compute_metrics,
@@ -166,3 +169,88 @@ class TestScheduling:
         stats = {"1.1.1.1": new_target_state()}
         assert mark_inflight(stats, "1.1.1.1") is True
         assert mark_inflight(stats, "1.1.1.1") is False  # already outstanding
+
+
+class TestPingProbeObservations:
+    """Architecture Step 2: completed ping probes optionally emit one
+    Observation(kind="ping.probe", evidence=OBSERVED) per outcome via an
+    injected sink. Existing behavior without a sink must not change."""
+
+    def test_no_sink_preserves_behavior(self):
+        plain = new_target_state()
+        observed = new_target_state()
+        log = ObservationLog()
+        m_plain = record_result(plain, True, 12.5)
+        m_observed = record_result(observed, True, 12.5,
+                                   target="10.0.0.1", sink=log.record)
+        assert m_plain == m_observed
+        assert list(plain["probes"]) == list(observed["probes"])
+        assert len(log) == 1  # sink path only adds emission, nothing else
+
+    def test_successful_probe_emits_observation(self):
+        log = ObservationLog()
+        record_result(new_target_state(), True, 12.5,
+                      target="10.0.0.1", sink=log.record)
+        assert len(log) == 1
+        obs = log.by_kind("ping.probe")[0]
+        assert obs.kind == "ping.probe"
+        assert obs.source == "ping"
+        assert obs.target == "10.0.0.1"
+        assert obs.evidence is EvidenceKind.OBSERVED
+        assert dict(obs.data) == {"success": True, "latency_ms": 12.5}
+        json.dumps(dict(obs.data))  # payload stays JSON-friendly
+
+    def test_failed_probe_emits_null_latency(self):
+        log = ObservationLog()
+        # Callers pass 0.0 for failed probes; the observation must still
+        # carry null, never a fake latency value.
+        record_result(new_target_state(), False, 0.0,
+                      target="10.0.0.2", sink=log.record)
+        assert len(log) == 1
+        obs = log.by_kind("ping.probe")[0]
+        assert obs.evidence is EvidenceKind.OBSERVED
+        assert dict(obs.data) == {"success": False, "latency_ms": None}
+
+    def test_repeated_probes_emit_in_order(self):
+        log = ObservationLog()
+        s = new_target_state()
+        record_result(s, True, 10.0, target="10.0.0.1", sink=log.record)
+        record_result(s, False, 0.0, target="10.0.0.1", sink=log.record)
+        record_result(s, True, 30.0, target="10.0.0.1", sink=log.record)
+        assert [dict(o.data) for o in log] == [
+            {"success": True, "latency_ms": 10.0},
+            {"success": False, "latency_ms": None},
+            {"success": True, "latency_ms": 30.0},
+        ]
+        # Derived metrics still come from the unified window, unaffected
+        # by the observation path.
+        m = compute_metrics(s)
+        assert m["avg"] == pytest.approx(20.0)
+        assert m["loss"] == pytest.approx(100 / 3)
+
+    def test_emitted_data_not_aliased_to_internal_state(self):
+        log = ObservationLog()
+        s = new_target_state()
+        record_result(s, True, 10.0, target="10.0.0.1", sink=log.record)
+        first = log.by_kind("ping.probe")[0]
+        # Later probes must not alter the already-emitted observation.
+        record_result(s, True, 99.0, target="10.0.0.1", sink=log.record)
+        record_result(s, False, 0.0, target="10.0.0.1", sink=log.record)
+        assert dict(first.data) == {"success": True, "latency_ms": 10.0}
+        # Consumers cannot mutate the logged observation's top-level data.
+        with pytest.raises(TypeError):
+            first.data["latency_ms"] = 0.0
+
+    def test_sink_is_caller_owned_not_global(self):
+        log_a, log_b = ObservationLog(), ObservationLog()
+        record_result(new_target_state(), True, 5.0,
+                      target="10.0.0.1", sink=log_a.record)
+        record_result(new_target_state(), True, 6.0,
+                      target="10.0.0.2", sink=log_b.record)
+        assert len(log_a) == 1 and log_a.by_target("10.0.0.1")
+        assert len(log_b) == 1 and log_b.by_target("10.0.0.2")
+
+    def test_target_defaults_to_empty_without_target(self):
+        log = ObservationLog()
+        record_result(new_target_state(), True, 5.0, sink=log.record)
+        assert log.by_kind("ping.probe")[0].target == ""

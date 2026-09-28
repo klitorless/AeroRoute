@@ -18,8 +18,19 @@ Scheduling:
   - each monitored target carries an "inflight" flag; the scheduler only
     starts a probe when the target is active and no probe is outstanding,
     so a slow target can never stack up overlapping probes.
+
+Observation emission (Architecture Step 2):
+  - record_result() accepts an optional `sink`: any callable taking one
+    Observation (for example ObservationLog.record bound to a caller-owned
+    log). One Observation(kind="ping.probe", evidence=OBSERVED) is emitted
+    per completed probe outcome.
+  - The sink is dependency-injected, never a global: ping_stats stores no
+    observations and knows no log. Callers that pass no sink behave
+    exactly as before.
 """
 from collections import deque
+
+from .observation import EvidenceKind, Observation
 
 WINDOW = 1000  # max probe outcomes retained per target
 
@@ -34,10 +45,31 @@ def new_target_state():
     }
 
 
-def record_result(state, success, latency):
-    """Record one probe outcome. Returns the metric dict for the UI."""
-    state["probes"].append((bool(success), latency if success else None))
+def record_result(state, success, latency, *, target=None, sink=None):
+    """Record one probe outcome. Returns the metric dict for the UI.
+
+    `target` is the normalized ping target the probe ran against (used
+    only for observation emission). `sink` is an optional callable
+    accepting one Observation — e.g. ObservationLog.record on a
+    caller-owned log. When given, exactly one Observation
+    (kind="ping.probe", source="ping", evidence=OBSERVED,
+    data={"success": bool, "latency_ms": float-or-None}) is emitted per
+    completed probe. Failed probes emit latency_ms=None, mirroring the
+    probe history: failures never contribute latency samples.
+    Callers without a sink behave exactly as before.
+    """
+    ok = bool(success)
+    lat = latency if ok else None
+    state["probes"].append((ok, lat))
     state["inflight"] = False
+    if sink is not None:
+        sink(Observation(
+            kind="ping.probe",
+            source="ping",
+            target=target if target is not None else "",
+            data={"success": ok, "latency_ms": lat},
+            evidence=EvidenceKind.OBSERVED,
+        ))
     return compute_metrics(state)
 
 
